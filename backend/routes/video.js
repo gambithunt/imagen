@@ -6,6 +6,9 @@ const fs = require("fs");
 
 const upload = multer();
 const axios = require("axios");
+// Mirror the backend flag for local writes. Default false.
+const ENABLE_LOCAL_STORAGE =
+  (process.env.ENABLE_LOCAL_STORAGE || "false").toLowerCase() === "true";
 
 // UUID v4 regex for RunwayML task validation
 const UUID_V4_REGEX =
@@ -134,9 +137,10 @@ router.post("/create", upload.single("image"), async (req, res) => {
     RUNWAY_BASE = RUNWAY_BASE.replace(/\/$/, "");
     // Debug log to confirm which base is being used
     console.log(`/api/video/create using RUNWAY_BASE=${RUNWAY_BASE}`);
-    // Ensure output dir
+    // Ensure output dir (only when local storage enabled)
     const outDir = path.join(__dirname, "..", "generated", "video_inputs");
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+    if (ENABLE_LOCAL_STORAGE && !fs.existsSync(outDir))
+      fs.mkdirSync(outDir, { recursive: true });
 
     let savedPath = null;
     if (file) {
@@ -145,20 +149,24 @@ router.post("/create", upload.single("image"), async (req, res) => {
         "_"
       );
       const absPath = path.join(outDir, filename);
-      fs.writeFileSync(absPath, file.buffer);
-      savedPath = `/generated/video_inputs/${filename}`;
+      if (ENABLE_LOCAL_STORAGE) {
+        fs.writeFileSync(absPath, file.buffer);
+        savedPath = `/generated/video_inputs/${filename}`;
+      }
       // compute a full URL that points to the backend static serve so the frontend
       // can open the saved image directly (avoids hitting the Vite dev server)
       const BACKEND_BASE = process.env.BACKEND_BASE || "http://localhost:3000";
       const savedUrl = `${BACKEND_BASE}${savedPath}`;
       // Confirm the file was written
-      const savedExists = fs.existsSync(absPath);
-      if (!savedExists) {
-        console.warn(
-          `/api/video/create warning: saved file not found at ${absPath}`
-        );
-      } else {
-        console.log(`/api/video/create saved input at ${absPath}`);
+      const savedExists = ENABLE_LOCAL_STORAGE ? fs.existsSync(absPath) : false;
+      if (ENABLE_LOCAL_STORAGE) {
+        if (!savedExists) {
+          console.warn(
+            `/api/video/create warning: saved file not found at ${absPath}`
+          );
+        } else {
+          console.log(`/api/video/create saved input at ${absPath}`);
+        }
       }
       // expose absPath and savedExists for debugging later in the response
       req._savedInput = { filename, absPath, savedExists, savedUrl };
@@ -293,11 +301,27 @@ router.post("/create", upload.single("image"), async (req, res) => {
           });
         }
 
-        const validRatios = ["1280:768", "768:1280"];
+        // RunwayML accepted ratios (keep in sync with Runway docs). If an
+        // unsupported ratio is passed, fall back to a safe default.
+        const validRatios = [
+          "1280:720",
+          "720:1280",
+          "1104:832",
+          "832:1104",
+          "960:960",
+          "1584:672",
+        ];
         const finalRatio =
-          ratio && validRatios.includes(ratio) ? ratio : "1280:768";
-        const finalModel =
-          model === "gen3a_aleph" ? "gen3a_aleph" : "gen3a_turbo";
+          ratio && validRatios.includes(ratio) ? ratio : "1280:720";
+
+        // Allowlist of supported runway models. We removed `gen3a_aleph` as a
+        // selectable option and added `gen4_turbo` and `gen4_aleph`.
+        const allowedModels = ["gen3a_turbo", "gen4_turbo", "gen4_aleph"];
+
+        // Use provided model if allowed, otherwise fall back to gen3a_turbo.
+        const finalModel = allowedModels.includes(model)
+          ? model
+          : "gen3a_turbo";
 
         const body = {
           model: finalModel,
@@ -472,6 +496,13 @@ router.get("/inputs", async (req, res) => {
     }
   }
   try {
+    if (!ENABLE_LOCAL_STORAGE) {
+      return res.json({
+        dir: "local-disabled",
+        files: [],
+        note: "Local storage disabled",
+      });
+    }
     const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
     return res.json({ dir, files });
   } catch (e) {
