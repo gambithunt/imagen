@@ -164,7 +164,8 @@ export function getSessionCategoryName(session: Session): string {
   if (session.type === "video") {
     const modelMap: Record<string, string> = {
       gen3a_turbo: "RunwayML Gen3 Turbo",
-      gen3a_aleph: "RunwayML Gen3 Aleph",
+      gen4_turbo: "RunwayML Gen4 Turbo",
+      gen4_aleph: "RunwayML Gen4 Aleph",
     };
     return modelMap[session.model] || `RunwayML ${session.model}`;
   }
