@@ -2,11 +2,14 @@
   import { createEventDispatcher } from "svelte";
   const dispatch = createEventDispatcher();
 
-  export let models = ["gen3a_turbo", "gen3a_aleph"];
+  // Available models for the video creation UI. Removed `gen3a_aleph` and
+  // added `gen4_turbo` and `gen4_aleph` per product update.
+  export let models = ["gen3a_turbo", "gen4_turbo", "gen4_aleph"];
 
   let promptText = "";
   let model = models[0];
-  let ratio = "1280:768";
+  // Use RunwayML-supported default ratio
+  let ratio = "1280:720";
   let duration = 5;
   let seed: number | "" = "";
   let imageFile: File | null = null;
@@ -63,8 +66,8 @@
         bind:value={ratio}
         class="w-full p-2 bg-gray-800 rounded"
       >
-        <option value="1280:768">1280:768 (Landscape)</option>
-        <option value="768:1280">768:1280 (Portrait)</option>
+        <option value="1280:720">1280:720 (Landscape)</option>
+        <option value="720:1280">720:1280 (Portrait)</option>
       </select>
     </div>
     <div>
