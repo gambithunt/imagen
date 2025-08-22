@@ -8,6 +8,13 @@ const path = require("path");
 const fs = require("fs");
 const r2 = require("./lib/r2");
 
+// Feature flag: enable or disable local disk storage of generated files.
+// Default: disabled (false) per user request. Set ENV ENABLE_LOCAL_STORAGE=true
+// to re-enable local writes during development.
+const ENABLE_LOCAL_STORAGE =
+  (process.env.ENABLE_LOCAL_STORAGE || "false").toLowerCase() === "true";
+console.log("ENABLE_LOCAL_STORAGE:", ENABLE_LOCAL_STORAGE);
+
 const app = express();
 const port = 3000;
 
@@ -448,7 +455,8 @@ app.get("/api/gallery/videos", (req, res) => {
               // Map model to category
               const modelMap = {
                 gen3a_turbo: "RunwayML Gen3 Turbo",
-                gen3a_aleph: "RunwayML Gen3 Aleph",
+                gen4_turbo: "RunwayML Gen4 Turbo",
+                gen4_aleph: "RunwayML Gen4 Aleph",
               };
 
               videos.push({
@@ -507,10 +515,12 @@ app.get("/api/gallery/videos", (req, res) => {
                 );
               }
 
-              // Map model to category
+              // Map model to category (legacy runwayml/ structure). Add gen4
+              // display names and remove gen3a_aleph which is no longer used.
               const modelMap = {
                 gen3a_turbo: "RunwayML Gen3 Turbo",
-                gen3a_aleph: "RunwayML Gen3 Aleph",
+                gen4_turbo: "RunwayML Gen4 Turbo",
+                gen4_aleph: "RunwayML Gen4 Aleph",
               };
 
               // Extract timestamp from filename for created date
@@ -570,6 +580,9 @@ app.delete("/api/gallery/image/:key(*)", async (req, res) => {
       await r2.deleteObject(key);
       res.json({ success: true, message: "Image deleted" });
     } else {
+      if (!ENABLE_LOCAL_STORAGE) {
+        return res.status(400).json({ error: "Local storage is disabled" });
+      }
       const filePath = path.join(__dirname, key);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
@@ -929,15 +942,19 @@ app.post("/api/generate", async (req, res) => {
     // Generate session ID for this image
     const sessionId = generateSessionId();
 
-    // Save to disk
+    // Save to disk (guarded by ENABLE_LOCAL_STORAGE)
     const dir = getOutputDir(model);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
     const filename = generateImageFilename(prompt);
     const filepath = `${dir}/${filename}`;
-    fs.writeFileSync(filepath, buffer);
-    const imageUrl = `data:image/png;base64,${buffer.toString("base64")}`;
+    let imageUrl = `data:image/png;base64,${buffer.toString("base64")}`;
+    let savedPath = null;
+    if (ENABLE_LOCAL_STORAGE) {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(filepath, buffer);
+      savedPath = filepath;
+    }
     // Try to upload to R2 (best-effort)
     let savedR2Url = null;
     try {
@@ -982,7 +999,7 @@ app.post("/api/generate", async (req, res) => {
       console.warn("R2 upload failed for imagen", e.message || e);
     }
 
-    res.json({ imageUrl, savedPath: filepath, savedR2Url });
+    res.json({ imageUrl, savedPath, savedR2Url });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to generate image" });
@@ -1034,14 +1051,18 @@ app.post("/api/sd/core", upload.none(), async (req, res) => {
       // Generate session ID for this image
       const sessionId = generateSessionId();
 
-      // Save to disk
+      // Save to disk (guarded by ENABLE_LOCAL_STORAGE)
       const dir = "generated/sd/core";
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       const filename = generateImageFilename(req.body.prompt || "image");
       const filepath = `${dir}/${filename}`;
-      fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
+      let savedPath = null;
+      if (ENABLE_LOCAL_STORAGE) {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
+        savedPath = filepath;
+      }
 
       // upload to R2 (best-effort)
       let savedR2Url = null;
@@ -1090,7 +1111,7 @@ app.post("/api/sd/core", upload.none(), async (req, res) => {
       } catch (e) {
         console.warn("R2 upload failed for sd core", e.message || e);
       }
-      res.json({ image: base64, savedPath: filepath, savedR2Url });
+      res.json({ image: base64, savedPath, savedR2Url });
     } else {
       res.status(response.status).json({ error: response.data.toString() });
     }
@@ -1167,14 +1188,18 @@ app.post("/api/sd/ultra", upload.single("image"), async (req, res) => {
       // Generate session ID for this image
       const sessionId = generateSessionId();
 
-      // Save to disk
+      // Save to disk (guarded by ENABLE_LOCAL_STORAGE)
       const dir = "generated/sd/ultra";
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       const filename = generateImageFilename(req.body.prompt || "image");
       const filepath = `${dir}/${filename}`;
-      fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
+      let savedPath = null;
+      if (ENABLE_LOCAL_STORAGE) {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
+        savedPath = filepath;
+      }
 
       let savedR2Url = null;
       try {
@@ -1223,7 +1248,7 @@ app.post("/api/sd/ultra", upload.single("image"), async (req, res) => {
       } catch (e) {
         console.warn("R2 upload failed for sd ultra", e.message || e);
       }
-      res.json({ image: base64, savedPath: filepath, savedR2Url });
+      res.json({ image: base64, savedPath, savedR2Url });
     } else {
       res.status(response.status).json({ error: response.data.toString() });
     }
@@ -1315,10 +1340,13 @@ app.post("/api/sd/xl", async (req, res) => {
       // Generate session ID for this batch of images
       const sessionId = generateSessionId();
 
-      // Save all images
+      // Save all images (guarded by ENABLE_LOCAL_STORAGE)
       const dir = "generated/sd/xl";
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+      let savedPaths = [];
+      if (ENABLE_LOCAL_STORAGE) {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
       }
       const prompt =
         (req.body.text_prompts &&
@@ -1326,7 +1354,6 @@ app.post("/api/sd/xl", async (req, res) => {
           req.body.text_prompts[0].text) ||
         "image";
 
-      const savedPaths = [];
       const imageKeys = [];
       const imageFilenames = [];
 
@@ -1334,8 +1361,10 @@ app.post("/api/sd/xl", async (req, res) => {
         const base64 = images[i];
         const filename = generateImageFilename(prompt);
         const filepath = `${dir}/${filename}`;
-        fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
-        savedPaths.push(filepath);
+        if (ENABLE_LOCAL_STORAGE) {
+          fs.writeFileSync(filepath, Buffer.from(base64, "base64"));
+          savedPaths.push(filepath);
+        }
 
         // Upload to R2 for each image
         try {
