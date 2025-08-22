@@ -1,0 +1,9 @@
+{
+  "watch": ["./routes", "./*.js", "../shared", "./*.env"],
+  "ext": "js,json,env",
+  "ignore": ["node_modules", "generated", "public", "*.test.js"],
+  "delay": "1000",
+  "env": {
+    "NODE_ENV": "development"
+  }
+}
