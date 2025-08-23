@@ -31,6 +31,7 @@ export interface VideoSession {
   promptText: string;
   taskId: string;
   inputImagePath?: string;
+  referenceImage?: string;
   createdAt: number;
   completedAt?: number;
   type: "video";
@@ -43,6 +44,7 @@ export type Session = ImageSession | VideoSession;
 export type SessionDetail = Session & {
   imageUrl?: string;
   videoUrl?: string;
+  referenceImage?: string;
   fullMetadata?: any;
 };
 
@@ -79,6 +81,9 @@ export async function fetchVideoSessions(): Promise<VideoSession[]> {
       promptText: video.promptText || "",
       taskId: video.taskId || "",
       inputImagePath: video.inputImagePath,
+      // if backend provides a referenceImage field, prefer it; otherwise
+      // fall back to inputImagePath
+      referenceImage: video.referenceImage || video.inputImagePath,
       createdAt: video.createdAt,
       completedAt: video.completedAt,
       type: "video" as const,
