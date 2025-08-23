@@ -6,9 +6,55 @@ export type VideoCreateParams = {
   seed?: number;
   imageFile?: File | null;
   imageUrl?: string;
+  videoFile?: File | null;
+  videoUrl?: string;
 };
 
 // Simple API client that posts to /api/video/create (backend should implement)
+// Separate polling function that can be called independently
+export async function pollVideoStatus(
+  taskId: string,
+  onProgress?: (status: any) => void
+): Promise<any> {
+  const API_BASE =
+    typeof window !== "undefined" ? (window as any).API_BASE || "" : "";
+  const statusUrl =
+    (API_BASE ? API_BASE : "http://localhost:3000") +
+    `/api/video/status/${taskId}`;
+  const interval = 2000;
+  const timeout = 2 * 60 * 1000; // 2 minutes
+  const start = Date.now();
+
+  while (true) {
+    try {
+      const sres = await fetch(statusUrl);
+      if (!sres.ok) {
+        const body = await sres.text();
+        if (onProgress)
+          onProgress({ error: `status error ${sres.status} ${body}` });
+      } else {
+        const sdata = await sres.json();
+        if (onProgress) onProgress(sdata);
+        if (sdata.done && (sdata.outputUri || sdata.savedVideoUrl)) {
+          return {
+            videoUrl: sdata.savedVideoUrl || sdata.outputUri,
+            savedVideoUrl: sdata.savedVideoUrl,
+            savedVideoPath: sdata.savedVideoPath,
+            ...sdata
+          };
+        }
+      }
+    } catch (e) {
+      if (onProgress) onProgress({ error: String(e) });
+    }
+    if (Date.now() - start > timeout) {
+      if (onProgress) onProgress({ error: "timeout", taskId });
+      throw new Error("timeout");
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
 export async function createVideo(params: VideoCreateParams) {
   const form = new FormData();
   form.append("promptText", params.promptText);
@@ -19,6 +65,9 @@ export async function createVideo(params: VideoCreateParams) {
   if (params.imageFile)
     form.append("image", params.imageFile, params.imageFile.name);
   if (params.imageUrl) form.append("imageUrl", params.imageUrl);
+  if (params.videoFile)
+    form.append("video", params.videoFile, params.videoFile.name);
+  if (params.videoUrl) form.append("videoUrl", params.videoUrl);
 
   // Backend URL — match other frontend pages which call http://localhost:3000
   const API_BASE =
@@ -50,39 +99,12 @@ export async function createVideo(params: VideoCreateParams) {
     (data.note && data.note === "task created") ||
     (data.id && !data.videoUrl)
   ) {
-    const taskId = data.id;
-    const statusUrl =
-      (API_BASE ? API_BASE : "http://localhost:3000") +
-      `/api/video/status/${taskId}`;
-    const interval = 2000;
-    const timeout = 2 * 60 * 1000; // 2 minutes
-    const start = Date.now();
-    while (true) {
-      try {
-        const sres = await fetch(statusUrl);
-        if (!sres.ok) {
-          const body = await sres.text();
-          if (onProgress)
-            onProgress({ error: `status error ${sres.status} ${body}` });
-        } else {
-          const sdata = await sres.json();
-          if (onProgress) onProgress(sdata);
-          if (sdata.done && (sdata.outputUri || sdata.savedVideoUrl)) {
-            // Use saved video URL if available, otherwise use original outputUri
-            data.videoUrl = sdata.savedVideoUrl || sdata.outputUri;
-            data.savedVideoUrl = sdata.savedVideoUrl;
-            data.savedVideoPath = sdata.savedVideoPath;
-            return data;
-          }
-        }
-      } catch (e) {
-        if (onProgress) onProgress({ error: String(e) });
-      }
-      if (Date.now() - start > timeout) {
-        if (onProgress) onProgress({ error: "timeout" });
-        return data;
-      }
-      await new Promise((r) => setTimeout(r, interval));
+    try {
+      const result = await pollVideoStatus(data.id, onProgress);
+      return { ...data, ...result };
+    } catch (e) {
+      // If polling times out, return the data with the task ID so UI can handle restart
+      return data;
     }
   }
 
