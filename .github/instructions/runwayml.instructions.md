@@ -119,6 +119,31 @@ Accepted values:
 "low"
 When set to low, the content moderation system will be less strict about preventing generations that include recognizable public figures.
 
+```
+// npm install --save @runwayml/sdk
+import RunwayML from '@runwayml/sdk';
+
+// The env var RUNWAYML_API_SECRET is expected to contain your API key.
+const client = new RunwayML();
+
+const task = await client.videoToVideo
+  .create({
+    model: 'gen4_aleph',
+    videoUri: 'https://example.com/bunny.mp4',
+    promptText: 'string',
+    references: [
+      {
+        type: 'image',
+        uri: 'https://example.com/easter-scene.jpg',
+      },
+    ],
+    ratio: '1280:720',
+  })
+  .waitForTaskOutput();
+
+console.log(task);
+```
+
 ## Upscale a video
 
 POST
