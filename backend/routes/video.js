@@ -301,19 +301,6 @@ router.post("/create", upload.single("image"), async (req, res) => {
           });
         }
 
-        // RunwayML accepted ratios (keep in sync with Runway docs). If an
-        // unsupported ratio is passed, fall back to a safe default.
-        const validRatios = [
-          "1280:720",
-          "720:1280",
-          "1104:832",
-          "832:1104",
-          "960:960",
-          "1584:672",
-        ];
-        const finalRatio =
-          ratio && validRatios.includes(ratio) ? ratio : "1280:720";
-
         // Allowlist of supported runway models. We removed `gen3a_aleph` as a
         // selectable option and added `gen4_turbo` and `gen4_aleph`.
         const allowedModels = ["gen3a_turbo", "gen4_turbo", "gen4_aleph"];
@@ -322,6 +309,36 @@ router.post("/create", upload.single("image"), async (req, res) => {
         const finalModel = allowedModels.includes(model)
           ? model
           : "gen3a_turbo";
+
+        // RunwayML accepted ratios per model (keep in sync with Runway docs).
+        // Make this model-aware so we send the correct allowed ratios for each
+        // model family. This prevents sending a ratio that the chosen model
+        // doesn't accept (which resulted in the Runway error).
+        const MODEL_VALID_RATIOS = {
+          gen4_turbo: [
+            "1280:720",
+            "720:1280",
+            "1104:832",
+            "832:1104",
+            "960:960",
+            "1584:672",
+          ],
+          gen4_aleph: [
+            "1280:720",
+            "720:1280",
+            "1104:832",
+            "832:1104",
+            "960:960",
+            "1584:672",
+          ],
+          // gen3a_turbo supports these two ratios only
+          gen3a_turbo: ["768:1280", "1280:768"],
+        };
+
+        const allowedRatios =
+          MODEL_VALID_RATIOS[finalModel] || MODEL_VALID_RATIOS.gen4_turbo;
+        const finalRatio =
+          ratio && allowedRatios.includes(ratio) ? ratio : allowedRatios[0];
 
         const body = {
           model: finalModel,
@@ -333,6 +350,11 @@ router.post("/create", upload.single("image"), async (req, res) => {
         if (seed) body.seed = Number(seed);
 
         console.log(`Sending to RunwayML with promptImage: ${promptImageUrl}`);
+        console.log(
+          `Runway payload preview: model=${finalModel}, ratio=${finalRatio}, duration=${
+            Number(duration) || 5
+          }`
+        );
 
         const headers = {
           Authorization: `Bearer ${RUNWAY_KEY}`,
@@ -389,7 +411,17 @@ router.post("/create", upload.single("image"), async (req, res) => {
             .toString(36)
             .substr(2, 9)}`;
 
-          // Store task metadata for later use in status endpoint
+          // Store task metadata for later use in status endpoint. Save a
+          // pointer to the input image that RunwayML will use. Prefer the
+          // signed/uploaded URL we generated for Runway (`promptImageUrl`) if
+          // available; otherwise fall back to any saved R2 URL or local saved
+          // URL captured on the request object.
+          const savedInputUrl =
+            promptImageUrl ||
+            (req._savedInput &&
+              (req._savedInput.savedR2Url || req._savedInput.savedUrl)) ||
+            null;
+
           taskMetadata.set(taskId, {
             model: finalModel,
             promptText,
@@ -397,7 +429,15 @@ router.post("/create", upload.single("image"), async (req, res) => {
             duration: Number(duration) || 5,
             seed,
             sessionId,
-            inputImagePath: req._savedInput ? req._savedInput.savedR2Url : null,
+            // Persistent pointers to the image used for this Runway task.
+            // `inputImagePath` is the canonical field; we also keep raw
+            // sources for debugging and fallback.
+            inputImagePath: savedInputUrl,
+            promptImageUrl: promptImageUrl || null,
+            savedR2Url: req._savedInput
+              ? req._savedInput.savedR2Url || null
+              : null,
+            savedUrl: req._savedInput ? req._savedInput.savedUrl || null : null,
             createdAt: Date.now(),
           });
 
@@ -619,7 +659,15 @@ router.get("/status/:id", async (req, res) => {
             sessionId,
             model,
             promptText: metadata ? metadata.promptText : "",
+            // Include a canonical input image path that points to the
+            // resource Runway used (signed R2 URL when available). This
+            // ensures metadata consumers can display the reference image.
             inputImagePath: metadata ? metadata.inputImagePath : null,
+            // Keep an explicit `referenceImage` field for clarity in UI
+            referenceImage: metadata ? metadata.inputImagePath : null,
+            // Also include raw saved values for debugging/fallback
+            savedR2Url: metadata ? metadata.savedR2Url || null : null,
+            savedUrl: metadata ? metadata.savedUrl || null : null,
             createdAt: metadata ? metadata.createdAt : timestamp,
             completedAt: timestamp,
             videoPath: videoR2Key,
