@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## When working
+
+Always make a list to keep track of where you are.
+
 ## Development Commands
 
 ### Frontend (Svelte 5 + TailwindCSS)
