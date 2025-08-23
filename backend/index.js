@@ -52,45 +52,87 @@ function generateSessionId() {
   return Date.now().toString() + "_" + Math.random().toString(36).substr(2, 9);
 }
 
-// Gallery endpoint for image sessions
+// Gallery endpoint for image sessions (both Imagen and SD)
 app.get("/api/gallery/image-sessions", async (req, res) => {
   try {
     if (!process.env.R2_BUCKET || !process.env.R2_ENDPOINT) {
       return res.json([]);
     }
 
-    const objects = await r2.listObjects("imagen_session/");
     const sessions = new Map();
 
-    for (const obj of objects) {
-      const pathParts = obj.Key.split("/");
-      if (pathParts.length >= 2) {
-        const sessionId = pathParts[1];
-        const filename = pathParts[2];
+    // Get Imagen sessions
+    try {
+      const imagenObjects = await r2.listObjects("imagen_session/");
+      for (const obj of imagenObjects) {
+        const pathParts = obj.Key.split("/");
+        if (pathParts.length >= 2) {
+          const sessionId = pathParts[1];
+          const filename = pathParts[2];
 
-        if (filename === "session.json") {
-          try {
-            const metadataBuffer = await r2.downloadToBuffer(obj.Key);
-            const metadata = JSON.parse(metadataBuffer.toString());
+          if (filename === "session.json") {
+            try {
+              const metadataBuffer = await r2.downloadToBuffer(obj.Key);
+              const metadata = JSON.parse(metadataBuffer.toString());
 
-            sessions.set(sessionId, {
-              sessionId,
-              timestamp: metadata.timestamp,
-              model: metadata.model,
-              prompt: metadata.prompt,
-              category: `Imagen Sessions`,
-              name: `${metadata.prompt.substring(0, 30)}... (${
-                metadata.model
-              })`,
-              createdAt: metadata.timestamp,
-              sessionDir: `imagen_session/${sessionId}`,
-              type: "image",
-            });
-          } catch (e) {
-            console.warn("Failed to parse session metadata:", e.message);
+              sessions.set(sessionId, {
+                sessionId,
+                timestamp: metadata.timestamp,
+                model: metadata.model,
+                prompt: metadata.prompt,
+                category: `Imagen Sessions`,
+                name: `${metadata.prompt.substring(0, 30)}... (${
+                  metadata.model
+                })`,
+                createdAt: metadata.timestamp,
+                sessionDir: `imagen_session/${sessionId}`,
+                type: "image",
+              });
+            } catch (e) {
+              console.warn("Failed to parse Imagen session metadata:", e.message);
+            }
           }
         }
       }
+    } catch (error) {
+      console.warn("No Imagen sessions found:", error.message);
+    }
+
+    // Get SD sessions
+    try {
+      const sdObjects = await r2.listObjects("sd_session/");
+      for (const obj of sdObjects) {
+        const pathParts = obj.Key.split("/");
+        if (pathParts.length >= 2) {
+          const sessionId = pathParts[1];
+          const filename = pathParts[2];
+
+          if (filename === "session.json") {
+            try {
+              const metadataBuffer = await r2.downloadToBuffer(obj.Key);
+              const metadata = JSON.parse(metadataBuffer.toString());
+
+              sessions.set(sessionId, {
+                sessionId,
+                timestamp: metadata.timestamp,
+                model: metadata.model,
+                prompt: metadata.prompt,
+                category: `SD Sessions`,
+                name: `${metadata.prompt.substring(0, 30)}... (${
+                  metadata.model
+                })`,
+                createdAt: metadata.timestamp,
+                sessionDir: `sd_session/${sessionId}`,
+                type: "image",
+              });
+            } catch (e) {
+              console.warn("Failed to parse SD session metadata:", e.message);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("No SD sessions found:", error.message);
     }
 
     const sessionArray = Array.from(sessions.values()).sort(
@@ -761,60 +803,6 @@ app.get("/api/gallery/video/:sessionId/video", async (req, res) => {
   }
 });
 
-// Get image sessions endpoint
-app.get("/api/gallery/image-sessions", async (req, res) => {
-  try {
-    let imageSessions = [];
-
-    // Get Imagen sessions
-    try {
-      const imagenObjects = await r2.listObjects("imagen_session/");
-      const imagenSessions = imagenObjects
-        .filter((obj) => obj.Key.endsWith("/session.json"))
-        .map((obj) => {
-          const sessionId = obj.Key.split("/")[1];
-          return {
-            sessionId,
-            key: obj.Key,
-            lastModified: obj.LastModified,
-            type: "imagen",
-          };
-        });
-      imageSessions = imageSessions.concat(imagenSessions);
-    } catch (error) {
-      console.warn("No imagen sessions found:", error.message);
-    }
-
-    // Get SD sessions
-    try {
-      const sdObjects = await r2.listObjects("sd_session/");
-      const sdSessions = sdObjects
-        .filter((obj) => obj.Key.endsWith("/session.json"))
-        .map((obj) => {
-          const sessionId = obj.Key.split("/")[1];
-          return {
-            sessionId,
-            key: obj.Key,
-            lastModified: obj.LastModified,
-            type: "sd",
-          };
-        });
-      imageSessions = imageSessions.concat(sdSessions);
-    } catch (error) {
-      console.warn("No SD sessions found:", error.message);
-    }
-
-    // Sort by lastModified (newest first)
-    imageSessions.sort(
-      (a, b) => new Date(b.lastModified) - new Date(a.lastModified)
-    );
-
-    res.json(imageSessions);
-  } catch (error) {
-    console.error("Error listing image sessions:", error);
-    res.status(500).json({ error: "Failed to list image sessions" });
-  }
-});
 
 // Get image session data endpoint
 app.get("/api/gallery/image/:sessionId/session", async (req, res) => {
