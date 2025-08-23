@@ -16,6 +16,47 @@
   let activeFilter: "all" | "image" | "video" = "all";
   let deleteConfirm: Session | null = null;
   let deleting = false;
+  let signedVideoUrl: string | null = null;
+  let signingError: string | null = null;
+
+  // Helper: resolve API base consistently
+  //  - prefer runtime `window.API_BASE` (if injected)
+  //  - then `import.meta.env.VITE_API_BASE` (Vite build-time)
+  //  - otherwise return empty string so we use relative `/api/...` endpoints
+  function getApiBase(): string {
+    try {
+      if (typeof window !== "undefined" && (window as any).API_BASE) {
+        return String((window as any).API_BASE).replace(/\/$/, "");
+      }
+    } catch (e) {
+      // ignore
+    }
+    try {
+      const v = (import.meta as any)?.env?.VITE_API_BASE;
+      if (v) return String(v).replace(/\/$/, "");
+    } catch (e) {
+      // ignore for environments without import.meta
+    }
+    // Since we have Vite proxy configured to forward /api to backend,
+    // return empty string so relative /api/... paths work correctly
+    return "";
+  }
+
+  // If a path starts with '/api/', and an API base is configured, prefix it.
+  // Otherwise return the original path so relative requests continue to work.
+  function prefixApiBase(path: string | null | undefined) {
+    if (!path) return path || null;
+    try {
+      const p = String(path);
+      if (p.startsWith("/api/")) {
+        const base = getApiBase();
+        return base ? `${base}${p}` : p;
+      }
+      return p;
+    } catch (e) {
+      return path as any;
+    }
+  }
 
   // Filtered sessions based on active filter
   $: filteredSessions = sessions.filter((session) => {
@@ -56,11 +97,235 @@
       const detail = await fetchSessionDetail(session.sessionId, session.type);
       if (detail) {
         selectedSession = detail;
+        // reset any previously cached signing state when a new session is selected
+        signedVideoUrl = null;
+        signingError = null;
       }
     } catch (error) {
       console.error("Failed to load session detail:", error);
     }
   }
+
+  async function getSignedVideoUrlFor(key: string | null | undefined) {
+    if (!key) return;
+    try {
+      const API_BASE = getApiBase();
+      const endpoint = API_BASE
+        ? `${API_BASE}/api/video/sign`
+        : `/api/video/sign`;
+      const response = await fetch(
+        `${endpoint}?key=${encodeURIComponent(key)}`
+      );
+      if (response.ok) {
+        const data = await response.json();
+        signedVideoUrl = data.signedUrl;
+        signingError = null;
+      } else {
+        signingError = `Failed to get signed URL: ${response.status}`;
+        console.warn("Failed to get signed URL for video:", response.status);
+      }
+    } catch (e) {
+      signingError = `Error signing URL: ${e}`;
+      console.warn("Error getting signed video URL:", e);
+    }
+  }
+
+  // Try to locate an image session by matching an image URL or filename.
+  // This is a best-effort helper used when clicking a reference image thumbnail
+  // from a video session; if a matching image session is found, open its
+  // details in the modal.
+  async function openImageSessionFromUrl(url: string) {
+    try {
+      // Make sure we have the latest sessions list
+      if (!sessions || sessions.length === 0) await loadSessions();
+
+      // Normalize URL and filename for matching
+      let filename = null;
+      try {
+        const u = new URL(url);
+        filename = u.pathname.split("/").pop();
+      } catch (e) {
+        filename = url.split("/").pop() || url;
+      }
+
+      // First try to match by imageUrl exactly
+      let found = sessions.find(
+        (s) => s.type === "image" && (s.imageUrl === url || s.imageKey === url)
+      );
+
+      // Fallback: match by filename appearing in imageKey or imageFilename
+      if (!found && filename) {
+        found = sessions.find(
+          (s) =>
+            s.type === "image" &&
+            ((s.imageFilename && s.imageFilename.endsWith(filename)) ||
+              (s.imageKey && s.imageKey.endsWith(filename)))
+        );
+      }
+
+      if (found) {
+        await openSessionDetail(found);
+      } else {
+        // If not found, open the raw image URL in a new tab as a fallback
+        window.open(url, "_blank", "noopener");
+      }
+    } catch (e) {
+      console.error("Failed to open image session from url", e);
+      window.open(url, "_blank", "noopener");
+    }
+  }
+
+  // Return a best-effort MIME type for common video file extensions so the
+  // browser can correctly recognize the <source> element. Defaults to
+  // 'video/mp4' when unknown which is widely supported.
+  function getMimeType(url: string | null | undefined) {
+    if (!url) return "video/mp4";
+    try {
+      // If url is a proxy with an encoded url parameter, inspect the inner URL
+      let probe = url;
+      const qIdx = String(url).indexOf("?url=");
+      if (qIdx !== -1) {
+        try {
+          const encoded = String(url).slice(qIdx + 5);
+          probe = decodeURIComponent(encoded);
+        } catch (e) {
+          // ignore and fall back to outer URL
+        }
+      }
+      const path = String(probe).split("?")[0].split("#")[0];
+      const ext = path.split(".").pop()?.toLowerCase();
+      switch (ext) {
+        case "mp4":
+        case "m4v":
+          return "video/mp4";
+        case "webm":
+          return "video/webm";
+        case "mov":
+          return "video/quicktime";
+        case "ogv":
+          return "video/ogg";
+        case "avi":
+          return "video/x-msvideo";
+        default:
+          return "video/mp4";
+      }
+    } catch (e) {
+      return "video/mp4";
+    }
+  }
+
+  // Prefer using the backend redirect endpoint for video playback so the
+  // browser receives the original signed URL and proper headers (Content-Type,
+  // Accept-Ranges). If sessionId is available use that endpoint; otherwise
+  // fall back to any provided videoUrl from metadata.
+  function getPlayableVideoSrc(session: any) {
+    if (!session) return null;
+    try {
+      // If metadata provides a proxy URL (backend sets /api/video/proxy?url=...), prefer it
+      if (
+        session.videoUrl &&
+        String(session.videoUrl).includes("/api/video/proxy")
+      ) {
+        return session.videoUrl;
+      }
+
+      // If videoUrl is an absolute signed URL (http(s)://...), proxy it so we control CORS & headers
+      if (session.videoUrl && /^https?:\/\//i.test(String(session.videoUrl))) {
+        return (
+          prefixApiBase(
+            `/api/video/proxy?url=${encodeURIComponent(session.videoUrl)}`
+          ) || `/api/video/proxy?url=${encodeURIComponent(session.videoUrl)}`
+        );
+      }
+
+      // If we have a raw signed URL exposed on the metadata, proxy that as well
+      if (
+        session._signedVideoUrl &&
+        /^https?:\/\//i.test(String(session._signedVideoUrl))
+      ) {
+        return (
+          prefixApiBase(
+            `/api/video/proxy?url=${encodeURIComponent(session._signedVideoUrl)}`
+          ) ||
+          `/api/video/proxy?url=${encodeURIComponent(session._signedVideoUrl)}`
+        );
+      }
+
+      // If we at least have a sessionId, use the gallery redirect endpoint which will 302 to the signed URL
+      if (session.sessionId) {
+        return (
+          prefixApiBase(`/api/gallery/video/${session.sessionId}/video`) ||
+          `/api/gallery/video/${session.sessionId}/video`
+        );
+      }
+    } catch (e) {
+      // ignore
+    }
+    return session.videoUrl || null;
+  }
+
+  // Compute a display URL for the selected session mirroring VideoResultCard's logic
+  $: displayVideoUrl = (() => {
+    if (!selectedSession) return null;
+
+    const s: any = selectedSession as any;
+
+    // If we already obtained a signed R2 URL for the stored path, use it
+    if (signedVideoUrl) return signedVideoUrl;
+
+    // If selectedSession.videoUrl exists, examine it
+    if (s.videoUrl) {
+      try {
+        const url = new URL(s.videoUrl, window?.location?.origin);
+        // Prefer proxy for R2-hosted or cloud provider URLs to avoid CORS
+        if (url.hostname.includes("r2.cloudflarestorage.com")) {
+          const API_BASE = getApiBase();
+          return API_BASE
+            ? `${API_BASE}/api/video/proxy?url=${encodeURIComponent(s.videoUrl)}`
+            : `/api/video/proxy?url=${encodeURIComponent(s.videoUrl)}`;
+        }
+        if (
+          url.hostname.includes("cloudfront.net") ||
+          url.hostname.includes("runwayml")
+        ) {
+          const API_BASE = getApiBase();
+          return API_BASE
+            ? `${API_BASE}/api/video/proxy?url=${encodeURIComponent(s.videoUrl)}`
+            : `/api/video/proxy?url=${encodeURIComponent(s.videoUrl)}`;
+        }
+      } catch (e) {
+        console.warn("Failed to parse selectedSession.videoUrl:", e);
+      }
+      return prefixApiBase(s.videoUrl) || s.videoUrl;
+    }
+
+    // If metadata exposes an internal signed URL field, proxy that
+    if (s._signedVideoUrl && /^https?:\/\//i.test(String(s._signedVideoUrl))) {
+      const API_BASE = getApiBase();
+      return API_BASE
+        ? `${API_BASE}/api/video/proxy?url=${encodeURIComponent(s._signedVideoUrl)}`
+        : `/api/video/proxy?url=${encodeURIComponent(s._signedVideoUrl)}`;
+    }
+
+    // If we have a stored object path in metadata, attempt to sign it (async)
+    // and meanwhile return null so the <video> won't be given an invalid src.
+    const candidateKey = s.videoPath || s.savedVideoPath || s.videoKey || null;
+    if (candidateKey && !signedVideoUrl && !signingError) {
+      // Kick off async signing; result will populate signedVideoUrl and update displayVideoUrl
+      getSignedVideoUrlFor(candidateKey);
+      return null;
+    }
+
+    // Fallback: if sessionId is present, use gallery redirect endpoint
+    if (s.sessionId) {
+      return (
+        prefixApiBase(`/api/gallery/video/${s.sessionId}/video`) ||
+        `/api/gallery/video/${s.sessionId}/video`
+      );
+    }
+
+    return null;
+  })();
 
   function closeModal() {
     selectedSession = null;
@@ -224,6 +489,25 @@
                 <div
                   class="bg-gray-800/50 backdrop-blur-sm border border-gray-700/50 rounded-xl p-6 hover:border-gray-500/50 transition-all duration-300 hover:scale-105 hover:shadow-xl"
                 >
+                  <!-- Thumbnail for reference image (video sessions) -->
+                  {#if session.type === "video" && session.inputImagePath}
+                    <div class="mb-4">
+                      <a
+                        href={`/video?ref=${encodeURIComponent(
+                          session.inputImagePath
+                        )}`}
+                        title="Open reference image in video create page"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <img
+                          src={session.inputImagePath}
+                          alt="reference thumbnail"
+                          class="w-24 h-16 object-cover rounded-md border border-gray-700"
+                        />
+                      </a>
+                    </div>
+                  {/if}
                   <!-- Session Header -->
                   <div class="flex items-start justify-between mb-4">
                     <div class="flex items-center space-x-3">
@@ -444,10 +728,34 @@
                 <span class="text-gray-400">Task ID:</span>
                 <div class="text-white font-mono">{selectedSession.taskId}</div>
               </div>
-              {#if selectedSession.inputImagePath}
+              {#if selectedSession.inputImagePath || selectedSession.referenceImage}
                 <div>
-                  <span class="text-gray-400">Input Image:</span>
-                  <div class="text-white">{selectedSession.inputImagePath}</div>
+                  <span class="text-gray-400">Reference Image:</span>
+                  <div class="mt-2 flex items-center space-x-3">
+                    {#if selectedSession.referenceImage}
+                      <button
+                        class="p-0 bg-transparent border-0"
+                        on:click={() => {
+                          if (
+                            selectedSession &&
+                            selectedSession.referenceImage
+                          ) {
+                            openImageSessionFromUrl(
+                              selectedSession.referenceImage
+                            );
+                          }
+                        }}
+                        title="Open image session"
+                      >
+                        <img
+                          src={selectedSession.referenceImage}
+                          alt="reference thumbnail"
+                          class="w-28 h-20 object-cover rounded-md border border-gray-700"
+                        />
+                      </button>
+                    {/if}
+                    <!-- Thumbnail is the clickable link to open the image session; hide raw URL per UX request -->
+                  </div>
                 </div>
               {/if}
               <div>
@@ -480,15 +788,27 @@
                   class="max-w-full max-h-96 object-contain rounded-lg mx-auto"
                 />
               {:else if selectedSession.videoUrl}
-                <!-- svelte-ignore a11y-media-has-caption -->
-                <video
-                  src={selectedSession.videoUrl}
-                  controls
-                  class="max-w-full max-h-96 object-contain rounded-lg mx-auto"
-                  preload="metadata"
-                >
-                  Your browser does not support the video tag.
-                </video>
+                <!-- Use the same display logic as the gallery VideoResultCard: -->
+                <!-- compute `displayVideoUrl` (signed/proxied) and use it as the video src -->
+                {#key displayVideoUrl}
+                  <!-- svelte-ignore a11y-media-has-caption -->
+                  <video
+                    controls
+                    playsinline
+                    crossorigin="anonymous"
+                    src={displayVideoUrl}
+                    class="max-w-full max-h-96 object-contain rounded-lg mx-auto"
+                    preload="metadata"
+                  >
+                    {#if displayVideoUrl}
+                      <source
+                        src={displayVideoUrl}
+                        type={getMimeType(displayVideoUrl)}
+                      />
+                    {/if}
+                    Your browser does not support the video tag.
+                  </video>
+                {/key}
               {/if}
             </div>
           </div>
