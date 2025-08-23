@@ -5,6 +5,9 @@
   // Available models for the video creation UI. Removed `gen3a_aleph` and
   // added `gen4_turbo` and `gen4_aleph` per product update.
   export let models = ["gen3a_turbo", "gen4_turbo", "gen4_aleph"];
+  
+  // Allow parent component to set initial model (e.g., for reference images)
+  export let initialModel: string | null = null;
 
   // Define a modular mapping from model -> allowed resolutions (as strings
   // in the form `WIDTH:HEIGHT`). This makes it easy to add new models and
@@ -18,7 +21,7 @@
   };
 
   let promptText = "";
-  let model = models[0];
+  let model = initialModel && models.includes(initialModel) ? initialModel : models[0];
   // Default to the first supported resolution for the selected model (if
   // available), otherwise fall back to a sensible default.
   const FALLBACK_RESOLUTIONS = ["1280:720", "720:1280"];
@@ -46,11 +49,18 @@
   let duration = 5;
   let seed: number | "" = "";
   let imageFile: File | null = null;
+  let videoFile: File | null = null;
 
   function onFileChange(e: Event) {
     const input = e.target as HTMLInputElement;
     imageFile = input.files?.[0] ?? null;
     dispatch("filechange", { file: imageFile });
+  }
+
+  function onVideoFileChange(e: Event) {
+    const input = e.target as HTMLInputElement;
+    videoFile = input.files?.[0] ?? null;
+    dispatch("videofilechange", { file: videoFile });
   }
 
   function submit(e: Event) {
@@ -61,7 +71,8 @@
       ratio,
       duration,
       seed: seed === "" ? undefined : Number(seed),
-      imageFile,
+      imageFile: model === "gen4_aleph" ? null : imageFile,
+      videoFile: model === "gen4_aleph" ? videoFile : null,
     });
   }
 </script>
@@ -129,20 +140,31 @@
       />
     </div>
     <div>
-      <label for="image" class="block mb-2">Image</label>
-      <input
-        id="image"
-        type="file"
-        accept="image/*"
-        on:change={onFileChange}
-        class="w-full p-2 bg-gray-800 rounded"
-      />
+      {#if model === "gen4_aleph"}
+        <label for="video" class="block mb-2">Reference Video</label>
+        <input
+          id="video"
+          type="file"
+          accept="video/*"
+          on:change={onVideoFileChange}
+          class="w-full p-2 bg-gray-800 rounded"
+        />
+      {:else}
+        <label for="image" class="block mb-2">Reference Image</label>
+        <input
+          id="image"
+          type="file"
+          accept="image/*"
+          on:change={onFileChange}
+          class="w-full p-2 bg-gray-800 rounded"
+        />
+      {/if}
     </div>
   </div>
 
   <div class="space-y-2">
     <button
-      class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full w-full transition-all duration-300 transform hover:scale-105 shadow-lg"
+      class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full mb-4 transition-all duration-300 transform hover:scale-105 shadow-blue-500/50 shadow-lg"
       type="submit">Create Video</button
     >
     <button
