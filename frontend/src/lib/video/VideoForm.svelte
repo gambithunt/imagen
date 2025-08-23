@@ -6,10 +6,43 @@
   // added `gen4_turbo` and `gen4_aleph` per product update.
   export let models = ["gen3a_turbo", "gen4_turbo", "gen4_aleph"];
 
+  // Define a modular mapping from model -> allowed resolutions (as strings
+  // in the form `WIDTH:HEIGHT`). This makes it easy to add new models and
+  // their supported resolutions in the future.
+  const MODEL_RESOLUTIONS: Record<string, string[]> = {
+    // gen4 family uses the existing Runway defaults (landscape & portrait)
+    gen4_turbo: ["1280:720", "720:1280"],
+    gen4_aleph: ["1280:720", "720:1280"],
+    // gen3a_turbo supports 768:1280 (portrait) and 1280:768 (landscape)
+    gen3a_turbo: ["768:1280", "1280:768"],
+  };
+
   let promptText = "";
   let model = models[0];
-  // Use RunwayML-supported default ratio
-  let ratio = "1280:720";
+  // Default to the first supported resolution for the selected model (if
+  // available), otherwise fall back to a sensible default.
+  const FALLBACK_RESOLUTIONS = ["1280:720", "720:1280"];
+  let ratio = MODEL_RESOLUTIONS[model]?.[0] ?? FALLBACK_RESOLUTIONS[0];
+
+  // Helper to format option labels e.g. "1280:720 (Landscape)"
+  function formatResolutionLabel(res: string) {
+    const parts = res.split(":").map(Number);
+    if (parts.length !== 2 || parts.some(Number.isNaN)) return res;
+    const [w, h] = parts;
+    const orientation =
+      w > h ? "(Landscape)" : w < h ? "(Portrait)" : "(Square)";
+    return `${res} ${orientation}`;
+  }
+
+  // Ensure ratio remains valid when the model changes. If the current ratio
+  // is not in the new model's allowed list, set it to the first allowed
+  // resolution for that model.
+  $: {
+    const allowed = MODEL_RESOLUTIONS[model] ?? FALLBACK_RESOLUTIONS;
+    if (!allowed.includes(ratio)) {
+      ratio = allowed[0];
+    }
+  }
   let duration = 5;
   let seed: number | "" = "";
   let imageFile: File | null = null;
@@ -60,14 +93,15 @@
 
   <div class="grid grid-cols-2 gap-4">
     <div>
-      <label for="ratio" class="block mb-2">Ratio</label>
+      <label for="ratio" class="block mb-2">Resolution</label>
       <select
         id="ratio"
         bind:value={ratio}
         class="w-full p-2 bg-gray-800 rounded"
       >
-        <option value="1280:720">1280:720 (Landscape)</option>
-        <option value="720:1280">720:1280 (Portrait)</option>
+        {#each MODEL_RESOLUTIONS[model] ?? FALLBACK_RESOLUTIONS as res}
+          <option value={res}>{formatResolutionLabel(res)}</option>
+        {/each}
       </select>
     </div>
     <div>
