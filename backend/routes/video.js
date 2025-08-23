@@ -117,11 +117,13 @@ async function poll(fn, { interval = 2000, timeout = 120000 } = {}) {
 }
 
 // POST /api/video/create
-// Accepts multipart form with fields: promptText, model, ratio, duration, seed, image
-router.post("/create", upload.single("image"), async (req, res) => {
+// Accepts multipart form with fields: promptText, model, ratio, duration, seed, image, video
+router.post("/create", upload.fields([{ name: "image", maxCount: 1 }, { name: "video", maxCount: 1 }]), async (req, res) => {
   try {
     const { promptText, model, ratio, duration, seed } = req.body;
-    const file = req.file;
+    const imageFile = req.files && req.files.image ? req.files.image[0] : null;
+    const videoFile = req.files && req.files.video ? req.files.video[0] : null;
+    const file = imageFile || videoFile; // for backward compatibility
 
     // Allow overriding Runway API base URL (some keys require api.dev.runwayml.com)
     let RUNWAY_BASE =
@@ -154,7 +156,7 @@ router.post("/create", upload.single("image"), async (req, res) => {
         savedPath = `/generated/video_inputs/${filename}`;
       }
       // compute a full URL that points to the backend static serve so the frontend
-      // can open the saved image directly (avoids hitting the Vite dev server)
+      // can open the saved file directly (avoids hitting the Vite dev server)
       const BACKEND_BASE = process.env.BACKEND_BASE || "http://localhost:3000";
       const savedUrl = `${BACKEND_BASE}${savedPath}`;
       // Confirm the file was written
@@ -170,7 +172,7 @@ router.post("/create", upload.single("image"), async (req, res) => {
       }
       // expose absPath and savedExists for debugging later in the response
       req._savedInput = { filename, absPath, savedExists, savedUrl };
-      // Try uploading input image to R2 (best-effort)
+      // Try uploading input file to R2 (best-effort)
       try {
         if (
           process.env.R2_BUCKET &&
@@ -178,10 +180,11 @@ router.post("/create", upload.single("image"), async (req, res) => {
         ) {
           const key = `video_inputs/${filename}`;
           const r2 = require("../lib/r2");
+          const defaultMimeType = videoFile ? "video/mp4" : "image/png";
           const r2url = await r2.uploadBuffer(
             file.buffer,
             key,
-            file.mimetype || "image/png"
+            file.mimetype || defaultMimeType
           );
           req._savedInput.savedR2Url = r2url;
         }
@@ -194,8 +197,9 @@ router.post("/create", upload.single("image"), async (req, res) => {
     const RUNWAY_KEY = process.env.RUNWAY_API_KEY;
     if (RUNWAY_KEY) {
       try {
-        // Get a signed R2 URL for the prompt image. RunwayML expects promptImage to be a URL, not a data URI.
+        // Handle video references for gen4_aleph or image references for other models
         let promptImageUrl = null;
+        let promptVideoUrl = null;
 
         if (file && req._savedInput && req._savedInput.savedR2Url) {
           // Convert the R2 public URL to a signed URL for RunwayML
@@ -203,20 +207,32 @@ router.post("/create", upload.single("image"), async (req, res) => {
             const u = new URL(req._savedInput.savedR2Url);
             const key = u.pathname.replace(/^\/+/, "");
             const r2 = require("../lib/r2");
-            promptImageUrl = await r2.getSignedUrl(key, 3600);
-            console.log(`Using signed URL from saved R2 upload`);
+            const signedUrl = await r2.getSignedUrl(key, 3600);
+            
+            if (videoFile) {
+              promptVideoUrl = signedUrl;
+              console.log(`Using signed video URL from saved R2 upload`);
+            } else {
+              promptImageUrl = signedUrl;
+              console.log(`Using signed image URL from saved R2 upload`);
+            }
           } catch (e) {
             console.warn(
               "Failed to create signed URL from saved R2 upload:",
               e.message
             );
-            promptImageUrl = req._savedInput.savedR2Url; // fallback to original
+            if (videoFile) {
+              promptVideoUrl = req._savedInput.savedR2Url; // fallback to original
+            } else {
+              promptImageUrl = req._savedInput.savedR2Url; // fallback to original
+            }
           }
-        } else if (req.body.imageUrl) {
+        } else if (req.body.imageUrl || req.body.videoUrl) {
           // Handle URL from gallery - convert to unsigned R2 public URL if possible
           try {
-            const imageUrl = req.body.imageUrl;
-            const u = new URL(imageUrl);
+            const sourceUrl = req.body.videoUrl || req.body.imageUrl;
+            const isVideoUrl = !!req.body.videoUrl;
+            const u = new URL(sourceUrl);
 
             // If it's an R2 URL (signed or unsigned), extract the key and get signed URL
             const isR2Host = /\br2\.cloudflarestorage\.com\b/i.test(u.host);
@@ -224,14 +240,25 @@ router.post("/create", upload.single("image"), async (req, res) => {
               const key = u.pathname.replace(/^\/+/, "");
               const r2 = require("../lib/r2");
               // Use signed URL for RunwayML access (expires in 1 hour)
-              promptImageUrl = await r2.getSignedUrl(key, 3600);
-              console.log(
-                `Using R2 signed URL for RunwayML: ${
-                  promptImageUrl.split("?")[0]
-                }?...`
-              );
+              const signedUrl = await r2.getSignedUrl(key, 3600);
+              
+              if (isVideoUrl) {
+                promptVideoUrl = signedUrl;
+                console.log(
+                  `Using R2 signed video URL for RunwayML: ${
+                    promptVideoUrl.split("?")[0]
+                  }?...`
+                );
+              } else {
+                promptImageUrl = signedUrl;
+                console.log(
+                  `Using R2 signed image URL for RunwayML: ${
+                    promptImageUrl.split("?")[0]
+                  }?...`
+                );
+              }
             } else if (
-              imageUrl.startsWith(
+              sourceUrl.startsWith(
                 `${
                   process.env.BACKEND_BASE || "http://localhost:3000"
                 }/generated/`
@@ -239,31 +266,52 @@ router.post("/create", upload.single("image"), async (req, res) => {
             ) {
               // If it's a local backend URL, try to upload to R2 for RunwayML access
               try {
-                const fetchResp = await axios.get(imageUrl, {
+                const fetchResp = await axios.get(sourceUrl, {
                   responseType: "arraybuffer",
                 });
                 const buf = Buffer.from(fetchResp.data);
-                const filename = `input_${Date.now()}_from_gallery.png`;
+                const extension = isVideoUrl ? "mp4" : "png";
+                const filename = `input_${Date.now()}_from_gallery.${extension}`;
                 const key = `video_inputs/${filename}`;
                 const r2 = require("../lib/r2");
-                await r2.uploadBuffer(buf, key, "image/png");
+                const mimeType = isVideoUrl ? "video/mp4" : "image/png";
+                await r2.uploadBuffer(buf, key, mimeType);
                 // Get signed URL for RunwayML access
-                promptImageUrl = await r2.getSignedUrl(key, 3600);
-                console.log(`Uploaded gallery image to R2 with signed URL`);
+                const signedUrl = await r2.getSignedUrl(key, 3600);
+                
+                if (isVideoUrl) {
+                  promptVideoUrl = signedUrl;
+                  console.log(`Uploaded gallery video to R2 with signed URL`);
+                } else {
+                  promptImageUrl = signedUrl;
+                  console.log(`Uploaded gallery image to R2 with signed URL`);
+                }
               } catch (uploadErr) {
                 console.warn(
-                  "Failed to upload gallery image to R2:",
+                  `Failed to upload gallery ${isVideoUrl ? 'video' : 'image'} to R2:`,
                   uploadErr.message
                 );
-                promptImageUrl = imageUrl; // fallback to original URL
+                if (isVideoUrl) {
+                  promptVideoUrl = sourceUrl; // fallback to original URL
+                } else {
+                  promptImageUrl = sourceUrl; // fallback to original URL
+                }
               }
             } else {
               // Use external URL directly
-              promptImageUrl = imageUrl;
+              if (isVideoUrl) {
+                promptVideoUrl = sourceUrl;
+              } else {
+                promptImageUrl = sourceUrl;
+              }
             }
           } catch (urlError) {
-            console.warn("Failed to parse imageUrl:", urlError.message);
-            promptImageUrl = req.body.imageUrl; // fallback to original
+            console.warn("Failed to parse URL:", urlError.message);
+            if (req.body.videoUrl) {
+              promptVideoUrl = req.body.videoUrl; // fallback to original
+            } else {
+              promptImageUrl = req.body.imageUrl; // fallback to original
+            }
           }
         } else if (file) {
           // Fallback: try to upload to R2 now if we have a file but no R2 URL
@@ -277,28 +325,46 @@ router.post("/create", upload.single("image"), async (req, res) => {
               }`.replace(/[^a-zA-Z0-9._-]/g, "_");
               const key = `video_inputs/${filename}`;
               const r2 = require("../lib/r2");
+              const defaultMimeType = videoFile ? "video/mp4" : "image/png";
               await r2.uploadBuffer(
                 file.buffer,
                 key,
-                file.mimetype || "image/png"
+                file.mimetype || defaultMimeType
               );
               // Get signed URL for RunwayML access
-              promptImageUrl = await r2.getSignedUrl(key, 3600);
-              console.log(`Uploaded file to R2 with signed URL`);
+              const signedUrl = await r2.getSignedUrl(key, 3600);
+              
+              if (videoFile) {
+                promptVideoUrl = signedUrl;
+                console.log(`Uploaded video file to R2 with signed URL`);
+              } else {
+                promptImageUrl = signedUrl;
+                console.log(`Uploaded image file to R2 with signed URL`);
+              }
             }
           } catch (e) {
             console.warn(
-              "Failed to upload image to R2 for RunwayML:",
+              `Failed to upload ${videoFile ? 'video' : 'image'} to R2 for RunwayML:`,
               e.message || e
             );
           }
         }
 
-        if (!promptImageUrl) {
-          return res.status(400).json({
-            error:
-              "No image provided or failed to upload to R2. RunwayML requires a valid image URL.",
-          });
+        // Validate that we have the correct reference type for the model
+        if (model === "gen4_aleph") {
+          if (!promptVideoUrl) {
+            return res.status(400).json({
+              error:
+                "No video provided or failed to upload to R2. RunwayML gen4_aleph requires a valid video URL.",
+            });
+          }
+        } else {
+          if (!promptImageUrl) {
+            return res.status(400).json({
+              error:
+                "No image provided or failed to upload to R2. RunwayML requires a valid image URL.",
+            });
+          }
         }
 
         // Allowlist of supported runway models. We removed `gen3a_aleph` as a
@@ -340,20 +406,43 @@ router.post("/create", upload.single("image"), async (req, res) => {
         const finalRatio =
           ratio && allowedRatios.includes(ratio) ? ratio : allowedRatios[0];
 
-        const body = {
-          model: finalModel,
-          promptImage: promptImageUrl,
-          promptText: promptText || "",
-          ratio: finalRatio,
-          duration: Number(duration) || 5,
-        };
+        let body;
+        let endpoint;
+        
+        if (finalModel === "gen4_aleph") {
+          // Use video_to_video endpoint for gen4_aleph
+          body = {
+            model: finalModel,
+            videoUri: promptVideoUrl,
+            promptText: promptText || "",
+            ratio: finalRatio,
+          };
+          endpoint = `${RUNWAY_BASE}/v1/video_to_video`;
+          
+          // Add image reference if we also have an image
+          if (promptImageUrl) {
+            body.references = [{
+              type: "image",
+              uri: promptImageUrl
+            }];
+          }
+        } else {
+          // Use image_to_video endpoint for other models
+          body = {
+            model: finalModel,
+            promptImage: promptImageUrl,
+            promptText: promptText || "",
+            ratio: finalRatio,
+            duration: Number(duration) || 5,
+          };
+          endpoint = `${RUNWAY_BASE}/v1/image_to_video`;
+        }
+        
         if (seed) body.seed = Number(seed);
 
-        console.log(`Sending to RunwayML with promptImage: ${promptImageUrl}`);
+        console.log(`Sending to RunwayML with ${finalModel === 'gen4_aleph' ? 'videoUri' : 'promptImage'}: ${promptVideoUrl || promptImageUrl}`);
         console.log(
-          `Runway payload preview: model=${finalModel}, ratio=${finalRatio}, duration=${
-            Number(duration) || 5
-          }`
+          `Runway payload preview: model=${finalModel}, ratio=${finalRatio}, endpoint=${endpoint}`
         );
 
         const headers = {
@@ -361,11 +450,7 @@ router.post("/create", upload.single("image"), async (req, res) => {
           "X-Runway-Version": "2024-11-06",
         };
 
-        const createResp = await axios.post(
-          `${RUNWAY_BASE}/v1/image_to_video`,
-          body,
-          { headers }
-        );
+        const createResp = await axios.post(endpoint, body, { headers });
 
         // If Runway returns a task or immediate output, try to extract video URL
         const createData = createResp.data || {};
@@ -412,12 +497,11 @@ router.post("/create", upload.single("image"), async (req, res) => {
             .substr(2, 9)}`;
 
           // Store task metadata for later use in status endpoint. Save a
-          // pointer to the input image that RunwayML will use. Prefer the
-          // signed/uploaded URL we generated for Runway (`promptImageUrl`) if
-          // available; otherwise fall back to any saved R2 URL or local saved
-          // URL captured on the request object.
+          // pointer to the input (image or video) that RunwayML will use. Prefer the
+          // signed/uploaded URL we generated for Runway if available; otherwise fall back to 
+          // any saved R2 URL or local saved URL captured on the request object.
           const savedInputUrl =
-            promptImageUrl ||
+            promptVideoUrl || promptImageUrl ||
             (req._savedInput &&
               (req._savedInput.savedR2Url || req._savedInput.savedUrl)) ||
             null;
@@ -429,11 +513,12 @@ router.post("/create", upload.single("image"), async (req, res) => {
             duration: Number(duration) || 5,
             seed,
             sessionId,
-            // Persistent pointers to the image used for this Runway task.
-            // `inputImagePath` is the canonical field; we also keep raw
-            // sources for debugging and fallback.
+            // Persistent pointers to the input (image or video) used for this Runway task.
+            // `inputImagePath` is the canonical field; we also keep raw sources for debugging and fallback.
             inputImagePath: savedInputUrl,
+            inputType: promptVideoUrl ? "video" : "image",
             promptImageUrl: promptImageUrl || null,
+            promptVideoUrl: promptVideoUrl || null,
             savedR2Url: req._savedInput
               ? req._savedInput.savedR2Url || null
               : null,
@@ -476,18 +561,16 @@ router.post("/create", upload.single("image"), async (req, res) => {
           "/api/video/create Runway error",
           e?.response?.data || e.message || e
         );
-        // fallback to stubbed response on error
-        const fakeId = `task_${Date.now()}`;
-        return res.json({
-          id: fakeId,
-          videoUrl: null,
+        // Return proper HTTP error instead of fake task ID
+        const errorMessage = e?.response?.data || e.message || e;
+        return res.status(400).json({
+          error: String(errorMessage),
           savedImage: savedPath,
           promptText,
           model,
           ratio,
           duration,
           seed,
-          error: String(e?.response?.data || e.message || e),
         });
       }
     }
@@ -659,12 +742,12 @@ router.get("/status/:id", async (req, res) => {
             sessionId,
             model,
             promptText: metadata ? metadata.promptText : "",
-            // Include a canonical input image path that points to the
-            // resource Runway used (signed R2 URL when available). This
-            // ensures metadata consumers can display the reference image.
+            // Include a canonical input path that points to the resource Runway used
             inputImagePath: metadata ? metadata.inputImagePath : null,
-            // Keep an explicit `referenceImage` field for clarity in UI
-            referenceImage: metadata ? metadata.inputImagePath : null,
+            inputType: metadata ? metadata.inputType || "image" : "image",
+            // Keep explicit reference fields for clarity in UI
+            referenceImage: metadata && metadata.inputType === "image" ? metadata.inputImagePath : null,
+            referenceVideo: metadata && metadata.inputType === "video" ? metadata.inputImagePath : null,
             // Also include raw saved values for debugging/fallback
             savedR2Url: metadata ? metadata.savedR2Url || null : null,
             savedUrl: metadata ? metadata.savedUrl || null : null,
