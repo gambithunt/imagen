@@ -216,7 +216,10 @@
     } catch (e) {
       signedUrl = getAbsoluteUrl(urlToSign);
     }
-    goto(`/video?ref=${encodeURIComponent(signedUrl)}`);
+    const params = new URLSearchParams();
+    params.set("ref", signedUrl);
+    params.set("refType", type);
+    goto(`/video?${params.toString()}`);
   }
 
   // Copy signed URL functionality
