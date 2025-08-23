@@ -42,3 +42,16 @@ Method:
 
 Be THOROUGH when gathering information. Make sure you have the FULL picture before replying. Use additional tool calls or clarifying questions as needed.
 </context_gathering>
+
+### Code editing rules
+
+Write code for clarity first. Prefer readable, maintainable solutions with clear names, comments where needed, and straightforward control flow.
+Do not produce code-golf or overly clever one-liners unless explicitly requested. Use high verbosity for writing co
+
+### guiding_principles
+
+- Clarity and Reuse: Every component and page should be modular and reusable. Avoid duplication by factoring repeated UI patterns into components.
+- Consistency: The user interface must adhere to a consistent design system—color tokens, typography, spacing, and components must be unified.
+- Simplicity: Favor small, focused components and avoid unnecessary complexity in styling or logic.
+- Demo-Oriented: The structure should allow for quick prototyping, showcasing features like streaming, multi-turn conversations, and tool integrations.
+- Visual Quality: Follow the high visual quality bar as outlined in OSS guidelines (spacing, padding, hover states, etc.)
